@@ -4,7 +4,7 @@ from layers.util import conv_nd, GroupNorm32, zero_module
 from layers.ResBlock import ResBlock, Downsample, Upsample
 from layers.SpatialTransformer import SpatialTransformer
 
-class LitUnet(nn.Module):
+class Unet(nn.Module):
     def __init__(self):
         super().__init__()
         self.image_size = 32
