@@ -42,16 +42,70 @@ def make_batch_sd(
 class LatentDiffusionInpainting(nn.Module):
     def __init__(self):
         super().__init__()
-        self.diffusion_model = Unet()
+        #self.diffusion_model = Unet()
         self.first_stage_model = AutoencoderKL()
         self.cond_stage_model, _, _ = open_clip.create_model_and_transforms("ViT-H-14", device=torch.device('cpu'), pretrained="laion2b_s32b_b79k")
         del self.cond_stage_model.visual
         self.max_length = 77
         self.scale_factor = 0.18215
+        self.channels = 4
 
     def forward(self, x):
 
         return
+    def sample(self,
+               S,
+               batch_size,
+               shape,
+               conditioning=None,
+               callback=None,
+               normals_sequence=None,
+               img_callback=None,
+               quantize_x0=False,
+               eta=0.,
+               mask=None,
+               x0=None,
+               temperature=1.,
+               noise_dropout=0.,
+               score_corrector=None,
+               corrector_kwargs=None,
+               verbose=True,
+               x_T=None,
+               log_every_t=100,
+               unconditional_guidance_scale=1.,
+               unconditional_conditioning=None, # this has to come in the same format as the conditioning, # e.g. as encoded tokens, ...
+               dynamic_threshold=None,
+               ucg_schedule=None,
+               **kwargs
+               ):
+        S=45
+        batch_size = 4
+        shape = [4, 104, 104]
+        conditioning ={'c_concat': [], 'c_crossattn': []}
+        callback = None
+        normals_sequence = None
+        img_callback = None
+        quantize_x0 = False
+        eta = 1.0
+        mask = None
+        x0 = None
+        temperature = 1.0
+        noise_dropout = 0.0
+        score_corrector = None
+        corrector_kwargs = None
+        verbose = False
+        x_T = "tensor of shape [4,4,104,104]"
+        log_every_t = 100
+        unconditional_guidance_scale = 10
+        unconditional_conditioning = {'c_concat': [], 'c_crossattn': []}
+        dynamic_threshold = None
+        ucg_schedule = None
+
+        ctmp = conditioning[list(conditioning.keys())[0]]
+        while isinstance(ctmp, list): ctmp = ctmp[0]
+        cbs = ctmp.shape[0]
+        #making a sampling schedule
+
     def get_conditional(self, text):
         tokens = open_clip.tokenize(text)
         x = self.cond_stage_model.token_embedding(tokens)
@@ -66,7 +120,26 @@ class LatentDiffusionInpainting(nn.Module):
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.cond_stage_model.ln_final(x)
         return x
-
+    def get_learned_conditioning(self, c):
+        c = self.cond_stage_model.encode(c)
+        return c
+    @torch.no_grad()
+    def get_unconditional_conditioning(self, batch_size, null_label=None):
+        if null_label is not None:
+            xc = null_label
+            if isinstance(xc, dict) or isinstance(xc, list):
+                c = self.get_learned_conditioning(xc)
+            else:
+                if hasattr(xc, "to"):
+                    xc = xc.to(self.device)
+                c = self.get_learned_conditioning(xc)
+        if isinstance(c, list):  # in case the encoder gives us a list
+            for i in range(len(c)):
+                c[i] = repeat(c[i], '1 ... -> b ...', b=batch_size).to(self.device)
+        else:
+            c = repeat(c, '1 ... -> b ...', b=batch_size).to(self.device)
+        return c
+    
 from PIL import Image
 if __name__ == "__main__":
     with torch.no_grad():
@@ -101,9 +174,21 @@ if __name__ == "__main__":
                 bchw = [num_samples, 4, h // 8, w // 8]
                 cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
             else:
+                model.first_stage_model =model.first_stage_model.to(device)
                 cc = model.scale_factor * model.first_stage_model.encode(cc).sample()
+                model.first_stage_model = model.first_stage_model.to(torch.device('cpu'))
             c_cat.append(cc)
         c_cat = torch.cat(c_cat, dim=1)
+        cond = {"c_concat": [c_cat], "c_crossattn": [c]}
+
+        #retrieving the conditioning for a null_label
+        uc_cross = model.get_conditional("")
+        uc_cross = repeat(uc_cross, '1 ... -> b ...', b=num_samples)
+        uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
+
+        shape = [model.channels , h // 8, w // 8]
+
+
 
 
 

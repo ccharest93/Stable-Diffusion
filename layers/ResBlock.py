@@ -1,6 +1,4 @@
 from torch import nn
-from torch.nn import functional as F
-from layers.util import GroupNorm32
 import torch
 
 class Upsample(nn.Module):
@@ -10,13 +8,15 @@ class Upsample(nn.Module):
                   padding=(1,1,1,1)):
         super().__init__()
         out_channels = out_channels or in_channels
+        #padding
+        self.padding = padding
         self.conv = torch.nn.Conv2d(in_channels,
                                     out_channels,
-                                    kernel_size=3,
-                                    padding=padding)
+                                    kernel_size=3)
 
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+        x = torch.nn.functional.pad(x, self.padding, mode="constant", value=0)
         x = self.conv(x)
         return x
 
@@ -26,14 +26,15 @@ class Downsample(nn.Module):
                  out_channels=None, 
                  padding=(1,1,1,1)):
         super().__init__()
+        self.padding = padding
         out_channels = out_channels or in_channels
         self.conv = torch.nn.Conv2d(in_channels,
                                         in_channels,
                                         kernel_size=3,
-                                        stride=2,
-                                        padding=padding)
+                                        stride=2)
 
     def forward(self, x):
+        x = torch.nn.functional.pad(x, self.padding, mode="constant", value=0)
         x = self.conv(x)
         return x
 
@@ -60,15 +61,15 @@ class ResBlock(nn.Module):
         emb_channels,
     ):
         super().__init__()
-        self.norm1 = GroupNorm32(in_channels)
-        self.conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
+        self.norm1 = torch.nn.GroupNorm(num_groups=32, num_channels=in_channels)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
 
         if emb_channels > 0:
             self.emb_proj = nn.Linear(emb_channels,out_channels),
         else:
             self.emb_proj = nn.Identity()
 
-        self.norm2 = GroupNorm32(out_channels)
+        self.norm2 = torch.nn.GroupNorm(num_groups=32, num_channels=out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
 
         if out_channels == in_channels:
@@ -88,4 +89,5 @@ class ResBlock(nn.Module):
         h = nn.SiLU()(h)
         h = self.conv2(h)
 
+        return self.skip_connection(x) + h
         return self.skip_connection(x) + h, (x, emb), self.parameters()
