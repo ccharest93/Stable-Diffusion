@@ -191,7 +191,7 @@ class SpatialTransformer(nn.Module):
         self.proj_in = nn.Linear(in_channels, inner_dim)
 
         self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(inner_dim, n_heads, 64, context_dim=1024)]
+            [BasicTransformerBlock(inner_dim, n_heads, context_dim=1024)]
         )
         self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
 

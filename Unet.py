@@ -25,14 +25,15 @@ class Unet(nn.Module):
         self.predict_codebook_ids = False
         self.dims = 2
 
+        time_embed_dim = self.model_channels * 4
         self.time_embed = nn.Sequential(
-            nn.Linear(self.model_channels, self.model_channels*4),
+            nn.Linear(self.model_channels, time_embed_dim),
             nn.SiLU(),
-            nn.Linear(self.model_channels*4, self.model_channels*4),
+            nn.Linear(time_embed_dim, time_embed_dim),
         )
 
         self.input_blocks = nn.ModuleList([
-            conv_nd(self.dims, self.in_channels, self.model_channels, 3, padding=1)
+            nn.Conv2d(self.in_channels, self.model_channels, 3, padding=1)
         ])
         self._feature_size = self.model_channels
         input_block_chans = [self.model_channels]
@@ -43,18 +44,18 @@ class Unet(nn.Module):
                 layers = [
                     ResBlock(
                         ch,
-                        out_channels=mult * self.model_channels,
+                        out_channels= mult * self.model_channels,
+                        emb_channels= time_embed_dim
                     )
                 ]
                 ch = mult * self.model_channels
                 if ds in self.attention_resolutions:
                     num_heads = ch // self.num_head_channels
                     dim_head = self.num_head_channels
-                    if (self.num_attention_blocks is None) or nr < self.num_attention_blocks[level]:
-                        layers.append(SpatialTransformer(ch, num_heads))
-            self.input_blocks.append(nn.Sequential(*layers))
-            self._feature_size += ch
-            input_block_chans.append(ch)
+                    layers.append(SpatialTransformer(ch, num_heads))
+                self.input_blocks.append(nn.Sequential(*layers))
+                self._feature_size += ch
+                input_block_chans.append(ch)
             if level != len(self.channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(Downsample(ch, out_channels=out_ch))
@@ -64,9 +65,9 @@ class Unet(nn.Module):
                 self._feature_size += ch
         
         self.middle_block = nn.Sequential(
-            ResBlock(ch, out_channels=ch),
+            ResBlock(ch, out_channels=ch, emb_channels=time_embed_dim),
             SpatialTransformer(ch, num_heads),
-            ResBlock(ch, out_channels=ch),)
+            ResBlock(ch, out_channels=ch, emb_channels=time_embed_dim),)
         
         self._feature_size += ch       
         self.output_blocks = nn.ModuleList([])
@@ -74,15 +75,14 @@ class Unet(nn.Module):
             for i in range(self.num_res_blocks[level] + 1):
                 ich = input_block_chans.pop()
                 layers = [
-                    ResBlock(ch + ich, out_channels=self.model_channels * mult,)
+                    ResBlock(ch + ich, out_channels=self.model_channels * mult,emb_channels=time_embed_dim)
                 ]
                 ch = self.model_channels * mult
                 if ds in self.attention_resolutions:
                     num_heads = ch // self.num_head_channels
                     dim_head = self.num_head_channels
+                    layers.append(SpatialTransformer(ch, num_heads))
 
-                    if self.num_attention_blocks is None or i < self.num_attention_blocks[level]:
-                        layers.append(SpatialTransformer(ch, num_heads))
                 if level and i == self.num_res_blocks[level]:
                     out_ch = ch
                     layers.append(Upsample(ch, out_channels=out_ch))
@@ -93,5 +93,4 @@ class Unet(nn.Module):
         self.out = nn.Sequential(
             GroupNorm32(ch),
             nn.SiLU(),
-            zero_module(conv_nd(self.dims, self.model_channels, self.out_channels, 3, padding=1)),
-        )
+            nn.Conv2d(self.model_channels, self.out_channels, 3, padding=1))
