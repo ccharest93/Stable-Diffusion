@@ -55,13 +55,13 @@ class ResBlock(nn.Module):
 
     def __init__(
         self,
-        channels,
+        in_channels,
         out_channels,
         emb_channels,
     ):
         super().__init__()
-        self.norm1 = GroupNorm32(channels)
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.norm1 = GroupNorm32(in_channels)
+        self.conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
 
         if emb_channels > 0:
             self.emb_proj = nn.Linear(emb_channels,out_channels),
@@ -71,10 +71,10 @@ class ResBlock(nn.Module):
         self.norm2 = GroupNorm32(out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
 
-        if out_channels == channels:
+        if out_channels == in_channels:
             self.skip_connection = nn.Identity()
         else:
-            self.skip_connection = nn.Conv2d( channels, out_channels, 1)
+            self.skip_connection = nn.Conv2d( in_channels, out_channels, 1)
 
     def forward(self, x, emb):
         h = self.norm1(x)

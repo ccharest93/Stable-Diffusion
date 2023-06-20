@@ -57,7 +57,7 @@ class Unet(nn.Module):
             input_block_chans.append(ch)
             if level != len(self.channel_mult) - 1:
                 out_ch = ch
-                self.input_blocks.append(Downsample( ch, out_channels=out_ch))
+                self.input_blocks.append(Downsample(ch, out_channels=out_ch))
                 ch = out_ch
                 input_block_chans.append(ch)
                 ds *= 2
