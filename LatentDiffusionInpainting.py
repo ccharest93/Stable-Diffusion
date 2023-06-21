@@ -18,7 +18,6 @@ def make_batch_sd(
         image,
         mask,
         txt,
-        device,
         num_samples=1):
     image = np.array(image.convert("RGB"))
     image = image[None].transpose(0, 3, 1, 2)
@@ -34,10 +33,10 @@ def make_batch_sd(
     masked_image = image * (mask < 0.5)
 
     batch = {
-        "image": repeat(image.to(device=device), "1 ... -> n ...", n=num_samples),
+        "image": repeat(image, "1 ... -> n ...", n=num_samples),
         "txt": num_samples * [txt],
-        "mask": repeat(mask.to(device=device), "1 ... -> n ...", n=num_samples),
-        "masked_image": repeat(masked_image.to(device=device), "1 ... -> n ...", n=num_samples),
+        "mask": repeat(mask, "1 ... -> n ...", n=num_samples),
+        "masked_image": repeat(masked_image, "1 ... -> n ...", n=num_samples),
     }
     return batch
 
@@ -50,7 +49,7 @@ def extract_into_tensor(a, t, x_shape):
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 class LatentDiffusionInpainting(nn.Module):
-    def __init__(self, ckpt_path):
+    def __init__(self):
         super().__init__()
         self.parameterization = 'eps' 
         self.image_size = 64
@@ -112,9 +111,9 @@ class LatentDiffusionInpainting(nn.Module):
                unconditional_conditioning=None):
         
         #get diffusion timesteps
-        num_ddpm_timesteps = S
-        c = num_ddpm_timesteps // self.dpm_num_timesteps
-        ddim_timesteps = np.asarray(list(range(0, num_ddpm_timesteps, c)))
+        num_ddim_timesteps = S
+        c = self.dpm_num_timesteps // num_ddim_timesteps
+        ddim_timesteps = np.asarray(list(range(0, self.dpm_num_timesteps , c)))
         ddim_timesteps = ddim_timesteps + 1
 
         # calculations for variance schedule
@@ -211,11 +210,12 @@ class LatentDiffusionInpainting(nn.Module):
 
 from PIL import Image
 if __name__ == "__main__":
+    ckpt = "512-inpainting-ema.ckpt"
     with torch.no_grad():
         input_image = {"image": Image.open("test.jpg"), "mask": Image.open("test.jpg")}
-        prompt = "A painting of a cat"
+        prompt = "A painting of a cat"        
         ddim_steps = 45
-        num_samples = 4
+        num_samples = 1
         scale = 10
         seed = 100
 
@@ -228,25 +228,42 @@ if __name__ == "__main__":
         print("Inpainting...", w, h)
 
         #inpaint function
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         model = LatentDiffusionInpainting()
+        di = torch.load(ckpt)["state_dict"]
+        #remove the model. prefix from the keys only if in the be
+        di = {k.replace("model.", "",1): v for k, v in di.items()}
+        di = model.state_dict()
+        for k in di:
+           if str(k).startswith("diffusion_model"):
+               print('"{}",'.format(k))
+        missing =[]
+        previous = []
+        model.load_state_dict(di, strict=True)
         prng = np.random.RandomState(seed) #rng
         start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
-        start_code = torch.from_numpy(start_code).to(device=device, dtype=torch.float32) #to device
-        batch = make_batch_sd(image, mask, txt=prompt, device=device, num_samples=num_samples)
+        start_code = torch.from_numpy(start_code)
+        batch = make_batch_sd(image, mask, txt=prompt, num_samples=num_samples)
         c = model.get_conditional(batch["txt"])
 
         c_cat = list()
+        # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
+        # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
         for ck in ['mask', 'masked_image']:
             cc = batch[ck].float()
             if ck != 'masked_image':
                 bchw = [num_samples, 4, h // 8, w // 8]
                 cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
             else:
-                model.first_stage_model =model.first_stage_model.to(device)
+                cc = cc.to(torch.device('cuda'))
+                model.first_stage_model =model.first_stage_model.to(torch.device('cuda'))
                 cc = model.scale_factor * model.first_stage_model.encode(cc).sample()
+                # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
+                # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
                 model.first_stage_model = model.first_stage_model.to(torch.device('cpu'))
+                cc = cc.to(torch.device('cpu'))
             c_cat.append(cc)
+        # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
+        # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
         c_cat = torch.cat(c_cat, dim=1)
         cond = {"c_concat": [c_cat], "c_crossattn": [c]}
 
@@ -256,7 +273,7 @@ if __name__ == "__main__":
         uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
 
         shape = [model.channels , h // 8, w // 8]
-        samples_cfg, intermediates = model.sample(
+        result = model.sample(
             ddim_steps,
             shape,
             cond,
