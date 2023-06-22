@@ -78,23 +78,19 @@ class LatentDiffusionInpainting(nn.Module):
         alphas_cumprod = np.cumprod(alphas, axis=0)
         alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
         to_torch = partial(torch.tensor, dtype=torch.float32)
-        self.betas = to_torch(betas)
-        self.alphas_cumprod = to_torch(alphas_cumprod)
-        self.alphas_cumprod_prev = to_torch(alphas_cumprod_prev)
+        self.register_buffer('betas', torch.tensor(betas))
+        self.register_buffer('alphas_cumprod', torch.tensor(alphas_cumprod))
+        self.register_buffer('alphas_cumprod_prev', torch.tensor(alphas_cumprod_prev))
         # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.sqrt_alphas_cumprod = to_torch(np.sqrt(alphas_cumprod))
-        self.sqrt_one_minus_alphas_cumprod = to_torch(np.sqrt(1. - alphas_cumprod))
-        self.log_one_minus_alphas_cumprod = to_torch(np.log(1. - alphas_cumprod))
-        self.sqrt_recip_alphas_cumprod = to_torch(np.sqrt(1. / alphas_cumprod))
-        self.sqrt_recipm1_alphas_cumprod = to_torch(np.sqrt(1. / alphas_cumprod - 1))
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posterior_variance = (1 - v_posterior) * betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod) + v_posterior * betas
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
-        self.posterior_variance = to_torch(posterior_variance)
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
-        self.posterior_log_variance_clipped = to_torch(np.log(np.maximum(posterior_variance, 1e-20)))
-        self.posterior_mean_coef1 = to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
-        self.posterior_mean_coef2 = to_torch((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))
+        self.register_buffer('sqrt_alphas_cumprod', torch.tensor(np.sqrt(alphas_cumprod)))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.tensor(np.sqrt(1. - alphas_cumprod)))
+        self.register_buffer('log_one_minus_alphas_cumprod', torch.tensor(np.log(1. - alphas_cumprod)))
+        self.register_buffer('sqrt_recip_alphas_cumprod', torch.tensor(np.sqrt(1. / alphas_cumprod)))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.tensor(np.sqrt(1. / alphas_cumprod - 1)))
+        self.register_buffer('posterior_variance', torch.tensor( (1 - v_posterior) * betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod) + v_posterior * betas))
+        self.register_buffer("posterior_log_variance_clipped", torch.log(torch.clamp(self.posterior_variance, 1e-20, 1.)))
+        self.register_buffer('posterior_mean_coef1', torch.tensor(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
+        self.register_buffer('posterior_mean_coef2', torch.tensor((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
         lvlb_weights = self.betas ** 2 / (2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
         lvlb_weights[0] = lvlb_weights[1]
         self.lvlb_weights = lvlb_weights
@@ -130,10 +126,15 @@ class LatentDiffusionInpainting(nn.Module):
         time_range = np.flip(timesteps)
         total_steps = timesteps.shape[0]
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
-
+        self.diffusion_model = self.diffusion_model.to(torch.device('cuda'))
+        img = img.to(torch.device('cuda'))
+        cond['c_concat'][0] = cond['c_concat'][0].to(torch.device('cuda'))
+        cond['c_crossattn'][0] = cond['c_crossattn'][0].to(torch.device('cuda'))
+        unconditional_conditioning['c_concat'][0] = unconditional_conditioning['c_concat'][0].to(torch.device('cuda'))
+        unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
+            ts = torch.full((b,), step, device=torch.device('cuda'), dtype=torch.long)
             outs = self.p_sample_ddim(img, cond, ts, 
                                     index=index, 
                                     temperature=temperature,
@@ -141,10 +142,17 @@ class LatentDiffusionInpainting(nn.Module):
                                     unconditional_conditioning=unconditional_conditioning,)
             img, pred_x0 = outs
             if index % log_every_t == 0 or index == total_steps - 1:
-                intermediates['x_inter'].append(img)
-                intermediates['pred_x0'].append(pred_x0)
+                intermediates['x_inter'].append(img.to(torch.device('cpu')))
+                intermediates['pred_x0'].append(pred_x0.to(torch.device('cpu')))
 
-        #decode into an image
+        #remove con
+        cond['c_concat'][0] = cond['c_concat'][0].to(torch.device('cuda'))
+        cond['c_crossattn'][0] = cond['c_crossattn'][0].to(torch.device('cuda'))
+        unconditional_conditioning['c_concat'][0] = unconditional_conditioning['c_concat'][0].to(torch.device('cuda'))
+        unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
+        img = img.to(torch.device('cpu'))
+        pred_x0 = pred_x0.to(torch.device('cpu'))
+        self.diffusion_model = self.diffusion_model.to(torch.device('cpu'))
         x_samples_ddim = model.decode_first_stage(img)
         result = torch.clamp((x_samples_ddim + 1.0) / 2.0,min=0.0, max=1.0)
         result = result.cpu().numpy().transpose(0, 2, 3, 1) * 255
@@ -231,14 +239,23 @@ if __name__ == "__main__":
         model = LatentDiffusionInpainting()
         di = torch.load(ckpt)["state_dict"]
         #remove the model. prefix from the keys only if in the be
-        di = {k.replace("model.", "",1): v for k, v in di.items()}
-        di = model.state_dict()
-        for k in di:
-           if str(k).startswith("diffusion_model"):
-               print('"{}",'.format(k))
+        #di = {k.replace("model.", "",1): v for k, v in di.items()}
+        di = {k.replace("model.diffusion_model", "diffusion_model",1): v for k, v in di.items()}
+        di = {k.replace(".in_layers.0.", ".norm1.",1): v for k, v in di.items()}
+        di = {k.replace(".in_layers.2.", ".conv1.",1): v for k, v in di.items()}
+        di = {k.replace(".out_layers.0.", ".norm2.",1): v for k, v in di.items()}
+        di = {k.replace(".out_layers.3.", ".conv2.",1): v for k, v in di.items()}
+        di = {k.replace(".0.op.", ".conv.",1): v for k, v in di.items()}
+        di = {k.replace(".input_blocks.0.0.", ".input_blocks.0.",1): v for k, v in di.items()}
+        di = {k.replace(".nin_shortcut.", ".skip_connection.",1): v for k, v in di.items()}
+        di = {k.replace("cond_stage_model.model.", "cond_stage_model.",1): v for k, v in di.items()}
+        #di = model.state_dict()
+        # for k in di:
+        #    if str(k).startswith("diffusion_model"):
+        #     print('"{}",'.format(k))
         missing =[]
         previous = []
-        model.load_state_dict(di, strict=True)
+        model.load_state_dict(di, strict=False)
         prng = np.random.RandomState(seed) #rng
         start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
         start_code = torch.from_numpy(start_code)
@@ -272,7 +289,7 @@ if __name__ == "__main__":
         uc_cross = repeat(uc_cross, '1 ... -> b ...', b=num_samples)
         uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
 
-        shape = [model.channels , h // 8, w // 8]
+        shape = [num_samples , h // 8, w // 8]
         result = model.sample(
             ddim_steps,
             shape,

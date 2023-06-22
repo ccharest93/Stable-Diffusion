@@ -65,7 +65,7 @@ class ResBlock(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
 
         if emb_channels > 0:
-            self.emb_proj = nn.Linear(emb_channels,out_channels),
+            self.emb_proj = nn.Linear(emb_channels,out_channels)
         else:
             self.emb_proj = nn.Identity()
 
@@ -77,13 +77,16 @@ class ResBlock(nn.Module):
         else:
             self.skip_connection = nn.Conv2d( in_channels, out_channels, 1)
 
-    def forward(self, x, emb):
+    def forward(self, x, emb=None, context=None):
         h = self.norm1(x)
         h = nn.SiLU()(h)
         h = self.conv1(h)
 
         if emb is not None:
-            h = h + self.emb_proj(nn.SiLU()(emb))[:,:,None,None]
+            temp = nn.SiLU()(emb)
+            temp = self.emb_proj(temp)
+            temp = temp[:,:,None,None]
+            h = h + temp
         
         h = self.norm2(h)
         h = nn.SiLU()(h)

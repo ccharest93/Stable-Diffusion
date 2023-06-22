@@ -195,7 +195,7 @@ class SpatialTransformer(nn.Module):
         )
         self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
 
-    def forward(self, x, context=None):
+    def forward(self, x,emb=None, context=None):
         # note: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
             context = [context]
