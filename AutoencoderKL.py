@@ -45,62 +45,36 @@ class DiagonalGaussianDistribution(object):
         return self.mean
 
 class Encoder(nn.Module):
-    def __init__(self, 
-                 *, 
-                 ch, 
-                 out_ch, 
-                 ch_mult=(1,2,4,8), 
-                 num_res_blocks,
-                 attn_resolutions, 
-                 dropout=0.0, 
-                 resamp_with_conv=True, 
-                 in_channels,
-                 resolution, 
-                 z_channels, 
-                 double_z=True, 
-                 use_linear_attn=False, 
-                 attn_type="vanilla",
-                 **ignore_kwargs):
+    def __init__(self):
         super().__init__()
-        ch = 128
-        out_ch = 3
-        ch_mult = [1, 2, 4, 4]
-        num_res_blocks = 2
-        attn_resolutions = []
-        dropout = 0.0
-        resamp_with_conv = True
+        ch_mult = [1, 2, 4, 4] #mult for channel at each resolution of encoding
+        self.num_resolutions = len(ch_mult) #nb of resolutions in encoder
+        self.num_res_blocks = 2  #residual block at each resolution
         in_channels = 3
-        resolution = 256
-        z_channels = 4
-        double_z = True
-        use_linear_attn = False
-        attn_type = "vanilla"
-        self.ch = ch
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
+        emb_channels = 128
+        time_emb_channels = 0
+        out_channels = 4
+
+        block_in = emb_channels*ch_mult[self.num_resolutions-1] #channels at starting resolution
 
         self.conv_in = torch.nn.Conv2d(in_channels,
-                                       self.ch,
+                                       block_in,
                                        kernel_size=3,
                                        stride=1,
                                        padding=1)
         
-        curr_res = resolution
         in_ch_mult = (1,)+tuple(ch_mult)
         self.in_ch_mult = in_ch_mult
         self.down = nn.ModuleList()
         for i_level in range(self.num_resolutions):
             block = nn.ModuleList()
             attn = nn.ModuleList()
-            block_in = ch*in_ch_mult[i_level]
-            block_out = ch*ch_mult[i_level]
+            block_in = emb_channels*in_ch_mult[i_level]
+            block_out = emb_channels*ch_mult[i_level]
             for _ in range(self.num_res_blocks):
                 block.append(ResBlock(in_channels=block_in,
                                          out_channels=block_out,
-                                         emb_channels=self.temb_ch,
+                                         time_emb_channels=time_emb_channels,
                                          ))
                 block_in = block_out
             down = nn.Module()
@@ -114,27 +88,23 @@ class Encoder(nn.Module):
         self.mid = nn.Module()
         self.mid.block_1 = ResBlock(in_channels=block_in,
                                        out_channels=block_in,
-                                       emb_channels=self.temb_ch)
+                                       time_emb_channels=time_emb_channels)
         self.mid.attn_1 = MemoryEfficientAttnBlock(block_in)
         self.mid.block_2 = ResBlock(in_channels=block_in,
                                        out_channels=block_in,
-                                       emb_channels=self.temb_ch)
+                                       time_emb_channels=time_emb_channels)
         
         self.norm_out = torch.nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = torch.nn.Conv2d(block_in,
-                                        2*z_channels,
+                                        2*out_channels,
                                         kernel_size=3,
                                         stride=1,
                                         padding=1)
     def forward(self, x):
-        # timestep embedding
-        temb = None
-
-        # downsampling
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1], temb)
+                h = self.down[i_level].block[i_block](hs[-1], None)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
@@ -143,67 +113,30 @@ class Encoder(nn.Module):
 
         # middle
         h = hs[-1]
-        h = self.mid.block_1(h, temb)
+        h = self.mid.block_1(h, emb=None, context=None)
         h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        h = self.mid.block_2(h, emb=None, context=None)
 
         # end
         h = self.norm_out(h)
         h = nn.SiLU()(h)
         h = self.conv_out(h)
         return h    
-
 class Decoder(nn.Module):
-    def __init__(self, 
-                 *, 
-                 ch, 
-                 out_ch, 
-                 ch_mult=(1,2,4,8),
-                   num_res_blocks,
-                 attn_resolutions, 
-                 dropout=0.0, 
-                 resamp_with_conv=True, 
-                 in_channels,
-                 resolution, 
-                 z_channels, 
-                 give_pre_end=False, 
-                 tanh_out=False, 
-                 use_linear_attn=False,
-                 attn_type="vanilla",
-                   **ignorekwargs):
+    def __init__(self):
         super().__init__()
-        self.ch = 128
-        self.out_ch = 3
-        self.ch_mult = [1, 2, 4, 4]
-        self.num_res_blocks = 2
-        self.attn_resolutions = []
-        self.dropout = 0.0
-        self.resamp_with_conv = True
-        self.in_channels = 3
-        self.resolution = 256
-        self.z_channels = 4
-        self.give_pre_end = False
-        self.tanh_out = False
-        self.use_linear_attn = False
+        ch_mult = [1, 2, 4, 4] #mult for channel at each resolution of decoding
+        self.num_resolutions = len(ch_mult) #nb of resolutions in decoder
+        self.num_res_blocks = 2 #residual block at each resolution
+        in_channels = 4
+        emb_channels = 128
+        time_emb_channels = 0 # needed for timeblock diffusion
+        out_channels = 3
 
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-        self.give_pre_end = give_pre_end
-        self.tanh_out = tanh_out
+        block_in = emb_channels*ch_mult[self.num_resolutions-1] #channels at starting resolution
 
-        # compute in_ch_mult, block_in and curr_res at lowest res
-        in_ch_mult = (1,)+tuple(ch_mult)
-        block_in = ch*ch_mult[self.num_resolutions-1]
-        curr_res = resolution // 2**(self.num_resolutions-1)
-        self.z_shape = (1,z_channels,curr_res,curr_res)
-        print("Working with z of shape {} = {} dimensions.".format(
-            self.z_shape, np.prod(self.z_shape)))
-
-        # z to block_in
-        self.conv_in = torch.nn.Conv2d(z_channels,
+        # in_channels to block_in
+        self.conv_in = torch.nn.Conv2d(in_channels,
                                        block_in,
                                        kernel_size=3,
                                        stride=1,
@@ -213,61 +146,50 @@ class Decoder(nn.Module):
         self.mid = nn.Module()
         self.mid.block_1 = ResBlock(in_channels=block_in,
                                        out_channels=block_in,
-                                       emb_channels=self.temb_ch,
+                                       time_emb_channels=time_emb_channels,
                                        )
         self.mid.attn_1 = MemoryEfficientAttnBlock(block_in)
         self.mid.block_2 = ResBlock(in_channels=block_in,
                                        out_channels=block_in,
-                                       emb_channels=self.temb_ch,
+                                       time_emb_channels=time_emb_channels,
                                        )
 
         # upsampling
         self.up = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_out = ch*ch_mult[i_level]
+            block_out = emb_channels*ch_mult[i_level]
             for _ in range(self.num_res_blocks+1):
                 block.append(ResBlock(in_channels=block_in,
                                          out_channels=block_out,
-                                         emb_channels=self.temb_ch,))
+                                         time_emb_channels=time_emb_channels,))
                 block_in = block_out
             up = nn.Module()
             up.block = block
-            up.attn = attn
             if i_level != 0:
                 up.upsample = Upsample(block_in)
-                curr_res = curr_res * 2
             self.up.insert(0, up) # prepend to get consistent order
 
         # end
         self.norm_out = torch.nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = torch.nn.Conv2d(block_in,
-                                        out_ch,
+                                        out_channels,
                                         kernel_size=3,
                                         stride=1,
                                         padding=1)
     def forward(self, z):
-                #assert z.shape[1:] == self.z_shape[1:]
-        self.last_z_shape = z.shape
-
-        # timestep embedding
-        temb = None
-
         # z to block_in
         h = self.conv_in(z)
 
         # middle
-        h = self.mid.block_1(h, temb)
+        h = self.mid.block_1(h, emb=None, context=None)
         h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        h = self.mid.block_2(h, emb=None, context=None)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks+1):
-                h = self.up[i_level].block[i_block](h, temb)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
+                h = self.up[i_level].block[i_block](h, emb = None, context = None)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
@@ -278,33 +200,11 @@ class Decoder(nn.Module):
 class AutoencoderKL(nn.Module):
     def __init__(self):
         super().__init__()
-        dd_config = {'double_z': True,
-                      'z_channels': 4, 
-                      'resolution': 256, 
-                      'in_channels': 3, 
-                      'out_ch': 3, 
-                      'ch': 128, 
-                      'ch_mult': [1, 2, 4, 4], 
-                      'num_res_blocks': 2, 
-                      'attn_resolutions': [], 
-                      'dropout': 0.0}
-        lossconfig = {'target': 'torch.nn.Identity'}
-        embed_dim = 4
-        ckpt_path = ""
-        ignore_keys =[]
-        image_key = 'image'
-        colorize_nlabels = None
-        monitor = 'val/rec_loss'
-        ema_decay = None
-        learn_logvar = False
-
-        self.encoder = Encoder(**dd_config)
-        self.decoder = Decoder(**dd_config)
-        self.loss = torch.nn.Identity()
+        self.encoder = Encoder()
+        self.decoder = Decoder()
         self.quant_conv = torch.nn.Conv2d(8, 8, kernel_size=1, stride=1, padding=0)
         self.post_quant_conv = torch.nn.Conv2d(4, 4, kernel_size=1, stride=1, padding=0)
-        self.embed_dim = embed_dim
-        self.monitor = monitor
+        x = 3
 
     def encode(self, x):
         h = self.encoder(x)
