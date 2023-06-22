@@ -78,19 +78,19 @@ class LatentDiffusionInpainting(nn.Module):
         alphas_cumprod = np.cumprod(alphas, axis=0)
         alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
         to_torch = partial(torch.tensor, dtype=torch.float32)
-        self.register_buffer('betas', torch.tensor(betas))
-        self.register_buffer('alphas_cumprod', torch.tensor(alphas_cumprod))
-        self.register_buffer('alphas_cumprod_prev', torch.tensor(alphas_cumprod_prev))
+        self.register_buffer('betas', to_torch(betas))
+        self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
+        self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
         # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.register_buffer('sqrt_alphas_cumprod', torch.tensor(np.sqrt(alphas_cumprod)))
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.tensor(np.sqrt(1. - alphas_cumprod)))
-        self.register_buffer('log_one_minus_alphas_cumprod', torch.tensor(np.log(1. - alphas_cumprod)))
-        self.register_buffer('sqrt_recip_alphas_cumprod', torch.tensor(np.sqrt(1. / alphas_cumprod)))
-        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.tensor(np.sqrt(1. / alphas_cumprod - 1)))
-        self.register_buffer('posterior_variance', torch.tensor( (1 - v_posterior) * betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod) + v_posterior * betas))
+        self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
+        self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1. - alphas_cumprod)))
+        self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
+        self.register_buffer('posterior_variance', to_torch( (1 - v_posterior) * betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod) + v_posterior * betas))
         self.register_buffer("posterior_log_variance_clipped", torch.log(torch.clamp(self.posterior_variance, 1e-20, 1.)))
-        self.register_buffer('posterior_mean_coef1', torch.tensor(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
-        self.register_buffer('posterior_mean_coef2', torch.tensor((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
+        self.register_buffer('posterior_mean_coef1', to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
+        self.register_buffer('posterior_mean_coef2', to_torch((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
         lvlb_weights = self.betas ** 2 / (2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
         lvlb_weights[0] = lvlb_weights[1]
         self.lvlb_weights = lvlb_weights
@@ -132,6 +132,8 @@ class LatentDiffusionInpainting(nn.Module):
         cond['c_crossattn'][0] = cond['c_crossattn'][0].to(torch.device('cuda'))
         unconditional_conditioning['c_concat'][0] = unconditional_conditioning['c_concat'][0].to(torch.device('cuda'))
         unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
+        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(torch.device('cuda'))
+        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(torch.device('cuda'))
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
             ts = torch.full((b,), step, device=torch.device('cuda'), dtype=torch.long)
@@ -150,10 +152,14 @@ class LatentDiffusionInpainting(nn.Module):
         cond['c_crossattn'][0] = cond['c_crossattn'][0].to(torch.device('cuda'))
         unconditional_conditioning['c_concat'][0] = unconditional_conditioning['c_concat'][0].to(torch.device('cuda'))
         unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
-        img = img.to(torch.device('cpu'))
+        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(torch.device('cuda'))
+        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(torch.device('cuda'))
         pred_x0 = pred_x0.to(torch.device('cpu'))
         self.diffusion_model = self.diffusion_model.to(torch.device('cpu'))
-        x_samples_ddim = model.decode_first_stage(img)
+
+        model.first_stage_model =model.first_stage_model.to(torch.device('cuda'))
+        x_samples_ddim = self.first_stage_model.decode(img)
+        model.first_stage_model =model.first_stage_model.to(torch.device('cpu'))
         result = torch.clamp((x_samples_ddim + 1.0) / 2.0,min=0.0, max=1.0)
         result = result.cpu().numpy().transpose(0, 2, 3, 1) * 255
         return [Image.fromarray(img.astype(np.uint8)) for img in result]
@@ -176,6 +182,7 @@ class LatentDiffusionInpainting(nn.Module):
                         c[k]])
         xc = torch.cat([x_in] + c_in['c_concat'], dim=1)
         cc = torch.cat(c_in['c_crossattn'], 1)
+
         out = self.diffusion_model(xc, t_in, context=cc)
         model_uncond, model_t = out.chunk(2)
         model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
@@ -258,7 +265,7 @@ if __name__ == "__main__":
         model.load_state_dict(di, strict=False)
         prng = np.random.RandomState(seed) #rng
         start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
-        start_code = torch.from_numpy(start_code)
+        start_code = torch.from_numpy(start_code).to(device=torch.device('cpu'), dtype=torch.float32)
         batch = make_batch_sd(image, mask, txt=prompt, num_samples=num_samples)
         c = model.get_conditional(batch["txt"])
 
@@ -289,7 +296,7 @@ if __name__ == "__main__":
         uc_cross = repeat(uc_cross, '1 ... -> b ...', b=num_samples)
         uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
 
-        shape = [num_samples , h // 8, w // 8]
+        shape = [num_samples, model.channels , h // 8, w // 8]
         result = model.sample(
             ddim_steps,
             shape,
@@ -299,6 +306,8 @@ if __name__ == "__main__":
             unconditional_conditioning=uc_full,
             x_T=start_code,
         )
+        #save pil img 
+
         
 
 

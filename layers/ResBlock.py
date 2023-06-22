@@ -83,10 +83,7 @@ class ResBlock(nn.Module):
         h = self.conv1(h)
 
         if emb is not None:
-            temp = nn.SiLU()(emb)
-            temp = self.emb_proj(temp)
-            temp = temp[:,:,None,None]
-            h = h + temp
+            h = h + self.emb_proj(nn.SiLU()(emb))[:,:,None,None]
         
         h = self.norm2(h)
         h = nn.SiLU()(h)

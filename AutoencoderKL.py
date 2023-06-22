@@ -247,7 +247,34 @@ class Decoder(nn.Module):
                                         kernel_size=3,
                                         stride=1,
                                         padding=1)
+    def forward(self, z):
+                #assert z.shape[1:] == self.z_shape[1:]
+        self.last_z_shape = z.shape
 
+        # timestep embedding
+        temb = None
+
+        # z to block_in
+        h = self.conv_in(z)
+
+        # middle
+        h = self.mid.block_1(h, temb)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h, temb)
+
+        # upsampling
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks+1):
+                h = self.up[i_level].block[i_block](h, temb)
+                if len(self.up[i_level].attn) > 0:
+                    h = self.up[i_level].attn[i_block](h)
+            if i_level != 0:
+                h = self.up[i_level].upsample(h)
+
+        h = self.norm_out(h)
+        h = nn.SiLU()(h)
+        h = self.conv_out(h)
+        return h
 class AutoencoderKL(nn.Module):
     def __init__(self):
         super().__init__()

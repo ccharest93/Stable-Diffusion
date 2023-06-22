@@ -31,23 +31,22 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
 class Unet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.image_size = 32
-        self.in_channels = 9
+        in_channels = 9
         self.model_channels = 320
-        self.out_channels = 4
-        self.num_res_blocks = [2,2,2,2]
-        self.attention_resolutions = [4,2,1]
-        self.dropout = 0
-        self.channel_mult = [1,2,4,4]
-        self.conv_resample = True
-        self.num_classes = None
-        self.use_checkpoint = True
-        self.dtype = torch.float32
-        self.num_heads = -1
-        self.num_head_channels = 64
-        self.num_heads_upsample = -1
-        self.predict_codebook_ids = False
-        self.dims = 2
+        out_channels = 4
+        num_res_blocks = [2,2,2,2]
+        attention_resolutions = [4,2,1]
+        dropout = 0
+        channel_mult = [1,2,4,4]
+        conv_resample = True
+        num_classes = None
+        use_checkpoint = True
+        dtype = torch.float32
+        num_heads = -1
+        num_head_channels = 64
+        num_heads_upsample = -1
+        predict_codebook_ids = False
+        dims = 2
 
         time_embed_dim = self.model_channels * 4
         self.time_embed = nn.Sequential(
@@ -57,14 +56,14 @@ class Unet(nn.Module):
         )
 
         self.input_blocks = nn.ModuleList([
-            nn.Conv2d(self.in_channels, self.model_channels, 3, padding=1)
+            nn.Conv2d(in_channels, self.model_channels, 3, padding=1)
         ])
         self._feature_size = self.model_channels
         input_block_chans = [self.model_channels]
         ch = self.model_channels
         ds = 1
-        for level, mult in enumerate(self.channel_mult):
-            for nr in range(self.num_res_blocks[level]):
+        for level, mult in enumerate(channel_mult):
+            for nr in range(num_res_blocks[level]):
                 layers = [
                     ResBlock(
                         ch,
@@ -89,10 +88,10 @@ class Unet(nn.Module):
                 ds *= 2
                 self._feature_size += ch
         
-        self.middle_block = nn.Sequential(
+        self.middle_block = nn.ModuleList([
             ResBlock(ch, out_channels=ch, emb_channels=time_embed_dim),
             SpatialTransformer(ch, num_heads),
-            ResBlock(ch, out_channels=ch, emb_channels=time_embed_dim),)
+            ResBlock(ch, out_channels=ch, emb_channels=time_embed_dim),])
         
         self._feature_size += ch       
         self.output_blocks = nn.ModuleList([])
@@ -112,7 +111,7 @@ class Unet(nn.Module):
                     out_ch = ch
                     layers.append(Upsample(ch, out_channels=out_ch))
                     ds //= 2
-                self.output_blocks.append(nn.Sequential(*layers))
+                self.output_blocks.append(nn.ModuleList(layers))
                 self._feature_size += ch
 
         self.out = nn.Sequential(
@@ -120,12 +119,16 @@ class Unet(nn.Module):
             nn.SiLU(),
             nn.Conv2d(self.model_channels, self.out_channels, 3, padding=1))
     def forward(self,x, timesteps=None,context=None):
+        #self.model_channels
+        #self.time_embed
+        #self.input_blocks
+        #self.middle_blocks
+        #self.output_blocks
+        #self.out
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
-
-        h = x.type(self.dtype)
-
+        h = x
         for module in self.input_blocks:
             if isinstance(module, Downsample):
                 h = module(h)
@@ -139,10 +142,22 @@ class Unet(nn.Module):
                         h = timestep(h, emb=emb, context=context)
             hs.append(h)
 
-        h = self.middle_block(h, emb, context)
+
+        for module in self.middle_block:
+            h = module(h, emb=emb, context=context)
 
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
-        h = h.type(x.dtype)
+            if isinstance(module, nn.Conv2d):
+                h = module(h)
+            elif isinstance(module, nn.ModuleList):
+                for timestep in module:
+                    if isinstance(timestep, ResBlock):
+                        h = timestep(h, emb=emb, context=context)
+                    if isinstance(timestep, SpatialTransformer):
+                        h = timestep(h, emb=emb, context=context)
+                    if isinstance(timestep, Upsample):
+                        h = timestep(h)
+            else:
+                pass
         return self.out(h)

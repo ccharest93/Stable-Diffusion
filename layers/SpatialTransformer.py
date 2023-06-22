@@ -61,7 +61,8 @@ class MemoryEfficientCrossAttention(nn.Module):
 
     def forward(self, x, context=None, mask=None):
         q = self.to_q(x)
-        context = context or x
+        if context is None:
+            context = x
         k = self.to_k(context)
         v = self.to_v(context)
 
@@ -174,7 +175,7 @@ class BasicTransformerBlock(nn.Module):
         x = self.attn1(self.norm1(x), context= None) + x
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
-        return x, (x, context), self.parameters()
+        return x
 
 class SpatialTransformer(nn.Module):
     def __init__(self, 
