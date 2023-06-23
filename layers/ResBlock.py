@@ -8,7 +8,6 @@ class Upsample(nn.Module):
                   padding=(1,1,1,1)):
         super().__init__()
         out_channels = out_channels or in_channels
-        #padding
         self.padding = padding
         self.conv = torch.nn.Conv2d(in_channels,
                                     out_channels,
@@ -39,21 +38,6 @@ class Downsample(nn.Module):
         return x
 
 class ResBlock(nn.Module):
-    """
-    A residual block that can optionally change the number of channels.
-    :param channels: the number of input channels.
-    :param emb_channels: the number of timestep embedding channels.
-    :param dropout: the rate of dropout.
-    :param out_channels: if specified, the number of out channels.
-    :param use_conv: if True and out_channels is specified, use a spatial
-        convolution instead of a smaller 1x1 convolution to change the
-        channels in the skip connection.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param use_checkpoint: if True, use gradient checkpointing on this module.
-    :param up: if True, use this block for upsampling.
-    :param down: if True, use this block for downsampling.
-    """
-
     def __init__(
         self,
         in_channels,

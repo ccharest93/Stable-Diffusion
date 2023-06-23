@@ -257,13 +257,14 @@ if __name__ == "__main__":
         di = {k.replace(".input_blocks.0.0.", ".input_blocks.0.",1): v for k, v in di.items()}
         di = {k.replace(".nin_shortcut.", ".skip_connection.",1): v for k, v in di.items()}
         di = {k.replace("cond_stage_model.model.", "cond_stage_model.",1): v for k, v in di.items()}
+        di = {k.replace(".emb_layers.1.", ".emb_proj.",1): v for k, v in di.items()}
         #di = model.state_dict()
-        # for k in di:
-        #    if str(k).startswith("diffusion_model"):
-        #     print('"{}",'.format(k))
+        for k in di:
+           if str(k).startswith("diffusion_model"):
+            print('"{}",'.format(k))
         missing =[]
         previous = []
-        model.load_state_dict(di, strict=False)
+        model.load_state_dict(di, strict=True)
         prng = np.random.RandomState(seed) #rng
         start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
         start_code = torch.from_numpy(start_code).to(device=torch.device('cpu'), dtype=torch.float32)

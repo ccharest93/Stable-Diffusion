@@ -24,12 +24,11 @@ def timestep_embedding(timesteps, dim, max_period=10000):
 
     return embedding
 
-#need to clarify the structure from init parameters
 class Unet(nn.Module):
     def __init__(self):
         super().__init__()
         in_channels = 9
-        self.model_channels = 320
+        self.emb_channels = 320
         out_channels = 4
         num_res_blocks = [2,2,2,2]
         attention_resolutions = [4,2,1]
@@ -37,73 +36,80 @@ class Unet(nn.Module):
         num_heads = -1
         num_head_channels = 64
 
-        time_embed_dim = self.model_channels * 4
+        # Time embedding
+        time_embed_dim = self.emb_channels * 4
         self.time_embed = nn.Sequential(
-            nn.Linear(self.model_channels, time_embed_dim),
+            nn.Linear(self.emb_channels, time_embed_dim),
             nn.SiLU(),
             nn.Linear(time_embed_dim, time_embed_dim),
         )
 
+        #Input embedding
         self.input_blocks = nn.ModuleList([
-            nn.Conv2d(in_channels, self.model_channels, 3, padding=1)
+            nn.Conv2d(in_channels, self.emb_channels, 3, padding=1)
         ])
-        input_block_chans = [self.model_channels]
-        ch = self.model_channels
-        ds = 1
+
+        #UNET variables
+        input_block_chans = [self.emb_channels]
+        in_block = self.emb_channels
+        resolution = 1
+        #UNET down
         for level, mult in enumerate(channel_mult):
+            out_block = mult * self.emb_channels 
             for _ in range(num_res_blocks[level]):
                 layers = [
                     ResBlock(
-                        ch,
-                        out_channels= mult * self.model_channels,
+                        in_block,
+                        out_channels= out_block,
                         time_emb_channels= time_embed_dim
                     )
                 ]
                 
-                ch = mult * self.model_channels
-                if ds in attention_resolutions:
-                    num_heads = ch // num_head_channels
-                    layers.append(SpatialTransformer(ch, num_heads))
+                in_block = out_block
+                if resolution in attention_resolutions:
+                    num_heads = in_block // num_head_channels
+                    layers.append(SpatialTransformer(in_block, num_heads))
                 self.input_blocks.append(nn.ModuleList(layers))
-                input_block_chans.append(ch)
+                input_block_chans.append(in_block)
             if level != len(channel_mult) - 1:
-                out_ch = ch
-                self.input_blocks.append(Downsample(ch, out_channels=out_ch))
-                ch = out_ch
-                input_block_chans.append(ch)
-                ds *= 2
-        
+                self.input_blocks.append(Downsample(in_block, out_channels=out_block))
+                in_block = out_block
+                input_block_chans.append(in_block)
+                resolution *= 2
+        #UNET middle
         self.middle_block = nn.ModuleList([
-            ResBlock(ch, out_channels=ch, time_emb_channels=time_embed_dim),
-            SpatialTransformer(ch, num_heads),
-            ResBlock(ch, out_channels=ch, time_emb_channels=time_embed_dim),])
-            
+            ResBlock(in_block, out_channels=out_block, time_emb_channels=time_embed_dim),
+            SpatialTransformer(in_block, num_heads),
+            ResBlock(in_block, out_channels=out_block, time_emb_channels=time_embed_dim),])
+        #UNET up with residual connections
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
+            out_block = mult * self.emb_channels 
             for i in range(num_res_blocks[level] + 1):
-                ich = input_block_chans.pop()
+                res_channels = input_block_chans.pop()
                 layers = [
-                    ResBlock(ch + ich, out_channels=self.model_channels * mult,time_emb_channels=time_embed_dim)
+                    ResBlock(in_block + res_channels, out_channels=out_block,time_emb_channels=time_embed_dim)
                 ]
-                ch = self.model_channels * mult
-                if ds in attention_resolutions:
-                    num_heads = ch // num_head_channels
-                    layers.append(SpatialTransformer(ch, num_heads))
+                in_block = out_block
+                if resolution in attention_resolutions:
+                    num_heads = in_block // num_head_channels
+                    layers.append(SpatialTransformer(in_block, num_heads))
 
                 if level and i == num_res_blocks[level]:
-                    out_ch = ch
-                    layers.append(Upsample(ch, out_channels=out_ch))
-                    ds //= 2
+                    layers.append(Upsample(in_block, out_channels=out_block))
+                    resolution //= 2
                 self.output_blocks.append(nn.ModuleList(layers))
 
+        #Output embedding
         self.out = nn.Sequential(
-            torch.nn.GroupNorm(num_groups=32, num_channels=ch),
+            torch.nn.GroupNorm(num_groups=32, num_channels=in_block),
             nn.SiLU(),
-            nn.Conv2d(self.model_channels, out_channels, 3, padding=1))
+            nn.Conv2d(self.emb_channels, out_channels, 3, padding=1))
+    
     def forward(self,x, timesteps=None,context=None):
         h = x
         hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels)
+        t_emb = timestep_embedding(timesteps, self.emb_channels)
         emb = self.time_embed(t_emb)
         for module in self.input_blocks:
             if isinstance(module, Downsample):
@@ -135,4 +141,5 @@ class Unet(nn.Module):
                         h = timestep(h)
             else:
                 pass
+        
         return self.out(h)
