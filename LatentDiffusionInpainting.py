@@ -48,6 +48,7 @@ def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+from torchinfo import summary
 class LatentDiffusionInpainting(nn.Module):
     def __init__(self):
         super().__init__()

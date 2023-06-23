@@ -4,6 +4,7 @@ from layers.ResBlock import ResBlock, Downsample, Upsample
 from layers.SpatialTransformer import MemoryEfficientAttnBlock
 import numpy as np
 
+#Sampling distribution for prior
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False):
         self.parameters = parameters
@@ -53,9 +54,9 @@ class Encoder(nn.Module):
         in_channels = 3
         emb_channels = 128
         time_emb_channels = 0
-        out_channels = 4
+        out_channels = 4  
 
-        block_in = emb_channels*ch_mult[self.num_resolutions-1] #channels at starting resolution
+        block_in = emb_channels #channels at starting resolution
 
         self.conv_in = torch.nn.Conv2d(in_channels,
                                        block_in,
@@ -63,13 +64,10 @@ class Encoder(nn.Module):
                                        stride=1,
                                        padding=1)
         
-        in_ch_mult = (1,)+tuple(ch_mult)
-        self.in_ch_mult = in_ch_mult
         self.down = nn.ModuleList()
         for i_level in range(self.num_resolutions):
             block = nn.ModuleList()
             attn = nn.ModuleList()
-            block_in = emb_channels*in_ch_mult[i_level]
             block_out = emb_channels*ch_mult[i_level]
             for _ in range(self.num_res_blocks):
                 block.append(ResBlock(in_channels=block_in,
@@ -79,10 +77,8 @@ class Encoder(nn.Module):
                 block_in = block_out
             down = nn.Module()
             down.block = block
-            down.attn = attn
             if i_level != self.num_resolutions-1:
                 down.downsample = Downsample(block_in, padding=(0,1,0,1))
-                curr_res = curr_res // 2
             self.down.append(down)
         
         self.mid = nn.Module()
@@ -100,13 +96,13 @@ class Encoder(nn.Module):
                                         kernel_size=3,
                                         stride=1,
                                         padding=1)
+    
     def forward(self, x):
+        #encoding
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](hs[-1], None)
-                if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
             if i_level != self.num_resolutions-1:
                 hs.append(self.down[i_level].downsample(hs[-1]))
@@ -122,6 +118,7 @@ class Encoder(nn.Module):
         h = nn.SiLU()(h)
         h = self.conv_out(h)
         return h    
+
 class Decoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -154,7 +151,7 @@ class Decoder(nn.Module):
                                        time_emb_channels=time_emb_channels,
                                        )
 
-        # upsampling
+        #decoding
         self.up = nn.ModuleList()
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
@@ -197,6 +194,7 @@ class Decoder(nn.Module):
         h = nn.SiLU()(h)
         h = self.conv_out(h)
         return h
+    
 class AutoencoderKL(nn.Module):
     def __init__(self):
         super().__init__()
@@ -204,7 +202,6 @@ class AutoencoderKL(nn.Module):
         self.decoder = Decoder()
         self.quant_conv = torch.nn.Conv2d(8, 8, kernel_size=1, stride=1, padding=0)
         self.post_quant_conv = torch.nn.Conv2d(4, 4, kernel_size=1, stride=1, padding=0)
-        x = 3
 
     def encode(self, x):
         h = self.encoder(x)
