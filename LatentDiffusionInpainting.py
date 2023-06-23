@@ -7,6 +7,7 @@ import numpy as np
 from einops import repeat    
 from functools import partial
 from tqdm import tqdm
+from PIL import Image
 def pad_image(input_image):
     pad_w, pad_h = np.max(((2, 2), np.ceil(
         np.array(input_image.size) / 64).astype(int)), axis=0) * 64 - input_image.size
@@ -162,9 +163,9 @@ class LatentDiffusionInpainting(nn.Module):
         x_samples_ddim = self.first_stage_model.decode(img)
         model.first_stage_model =model.first_stage_model.to(torch.device('cpu'))
         result = torch.clamp((x_samples_ddim + 1.0) / 2.0,min=0.0, max=1.0)
-        result = result.cpu().numpy().transpose(0, 2, 3, 1) * 255
-        return [Image.fromarray(img.astype(np.uint8)) for img in result]
 
+        result = result.cpu().detach().numpy().transpose(0, 2, 3, 1) * 255
+        return [Image.fromarray(img.astype(np.uint8)) for img in result]
     @torch.no_grad()
     def p_sample_ddim(self, x, c, t, index, temperature=1.,unconditional_guidance_scale=1., unconditional_conditioning=None):
         b, *_, device = *x.shape, x.device
@@ -221,33 +222,10 @@ class LatentDiffusionInpainting(nn.Module):
 
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.cond_stage_model.ln_final(x)
-        return x
-    
+        return x    
 
-from PIL import Image
-if __name__ == "__main__":
-    ckpt = "512-inpainting-ema.ckpt"
-    with torch.no_grad():
-        input_image = {"image": Image.open("test.jpg"), "mask": Image.open("test.jpg")}
-        prompt = "A painting of a cat"        
-        ddim_steps = 45
-        num_samples = 1
-        scale = 10
-        seed = 100
-
-        #predict function
-        init_image = input_image["image"].convert("RGB")
-        init_mask = input_image["mask"].convert("RGB")
-        image = pad_image(init_image) # resize to integer multiple of 32
-        mask = pad_image(init_mask) # resize to integer multiple of 32
-        w, h = image.size
-        print("Inpainting...", w, h)
-
-        #inpaint function
-        model = LatentDiffusionInpainting()
-        di = torch.load(ckpt)["state_dict"]
-        #remove the model. prefix from the keys only if in the be
-        #di = {k.replace("model.", "",1): v for k, v in di.items()}
+    def load_checkpoints(self, ckpt_path = "512-inpainting-ema.ckpt"):
+        di = torch.load(ckpt_path)["state_dict"]
         di = {k.replace("model.diffusion_model", "diffusion_model",1): v for k, v in di.items()}
         di = {k.replace(".in_layers.0.", ".norm1.",1): v for k, v in di.items()}
         di = {k.replace(".in_layers.2.", ".conv1.",1): v for k, v in di.items()}
@@ -258,57 +236,115 @@ if __name__ == "__main__":
         di = {k.replace(".nin_shortcut.", ".skip_connection.",1): v for k, v in di.items()}
         di = {k.replace("cond_stage_model.model.", "cond_stage_model.",1): v for k, v in di.items()}
         di = {k.replace(".emb_layers.1.", ".emb_proj.",1): v for k, v in di.items()}
-        #di = model.state_dict()
-        for k in di:
-           if str(k).startswith("diffusion_model"):
-            print('"{}",'.format(k))
-        missing =[]
-        previous = []
-        model.load_state_dict(di, strict=True)
-        prng = np.random.RandomState(seed) #rng
-        start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
-        start_code = torch.from_numpy(start_code).to(device=torch.device('cpu'), dtype=torch.float32)
-        batch = make_batch_sd(image, mask, txt=prompt, num_samples=num_samples)
-        c = model.get_conditional(batch["txt"])
+        self.load_state_dict(di, strict=False)
 
-        c_cat = list()
-        # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
-        # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
-        for ck in ['mask', 'masked_image']:
-            cc = batch[ck].float()
-            if ck != 'masked_image':
-                bchw = [num_samples, 4, h // 8, w // 8]
-                cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
-            else:
-                cc = cc.to(torch.device('cuda'))
-                model.first_stage_model =model.first_stage_model.to(torch.device('cuda'))
-                cc = model.scale_factor * model.first_stage_model.encode(cc).sample()
-                # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
-                # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
-                model.first_stage_model = model.first_stage_model.to(torch.device('cpu'))
-                cc = cc.to(torch.device('cpu'))
-            c_cat.append(cc)
-        # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
-        # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
-        c_cat = torch.cat(c_cat, dim=1)
-        cond = {"c_concat": [c_cat], "c_crossattn": [c]}
 
-        #retrieving the conditioning for a null_label
-        uc_cross = model.get_conditional("")
-        uc_cross = repeat(uc_cross, '1 ... -> b ...', b=num_samples)
-        uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
+    
+def init_model():
+    model = LatentDiffusionInpainting()
+    model.load_checkpoints()
+    return model
+# from PIL import Image
+# if __name__ == "__main__":
+#     with torch.no_grad():
+#         input_image = {"image": Image.open("test.jpg"), "mask": Image.open("test.jpg")}
+#         prompt = "A painting of a cat"        
+#         #inpaint function
+#         model = LatentDiffusionInpainting()
+#         model.load_checkpoints()
+#         model.inpaint(input_image, prompt)
+#         #save pil img 
+def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
+    #preprocess
+    init_image = input["image"].convert("RGB")
+    init_mask = input["mask"].convert("RGB")
+    image = pad_image(init_image) # resize to integer multiple of 32
+    mask = pad_image(init_mask) # resize to integer multiple of 32
+    w, h = image.size
+    batch = make_batch_sd(image, mask, txt=prompt, num_samples=num_samples)
 
-        shape = [num_samples, model.channels , h // 8, w // 8]
-        result = model.sample(
-            ddim_steps,
-            shape,
-            cond,
-            eta=1.0,
-            unconditional_guidance_scale=scale,
-            unconditional_conditioning=uc_full,
-            x_T=start_code,
-        )
-        #save pil img 
+    #encoding text conditioning
+    c = model.get_conditional(batch["txt"])
+
+    #encoding image conditioning
+    c_cat = list()
+    # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
+    # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
+    for ck in ['mask', 'masked_image']:
+        cc = batch[ck].float()
+        if ck != 'masked_image':
+            bchw = [num_samples, 4, h // 8, w // 8]
+            cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
+        else:
+            cc = cc.to(torch.device('cuda'))
+            model.first_stage_model =model.first_stage_model.to(torch.device('cuda'))
+            cc = model.scale_factor * model.first_stage_model.encode(cc).sample()
+            # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
+            # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
+            model.first_stage_model = model.first_stage_model.to(torch.device('cpu'))
+            cc = cc.to(torch.device('cpu'))
+        c_cat.append(cc)
+    c_cat = torch.cat(c_cat, dim=1)
+    cond = {"c_concat": [c_cat], "c_crossattn": [c]}
+
+    #encoding null prompt conditioning
+    uc_cross = model.get_conditional("")
+    uc_cross = repeat(uc_cross, '1 ... -> b ...', b=num_samples)
+    uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
+
+    #sampling
+    prng = np.random.RandomState(seed) #rng
+    start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
+    start_code = torch.from_numpy(start_code).to(device=torch.device('cpu'), dtype=torch.float32)
+    shape = [num_samples, model.channels , h // 8, w // 8]
+    result = model.sample(
+        ddim_steps,
+        shape,
+        cond,
+        eta=1.0,
+        unconditional_guidance_scale=scale,
+        unconditional_conditioning=uc_full,
+        x_T=start_code,
+    )
+    return result
+
+with torch.no_grad():
+    model = init_model()
+    import gradio as gr
+    block = gr.Blocks().queue()
+    with block:
+        with gr.Row():
+            gr.Markdown("## Stable Diffusion Inpainting")
+
+        with gr.Row():
+            with gr.Column():
+                input_image = gr.Image(source='upload', tool='sketch', type="pil")
+                prompt = gr.Textbox(label="Prompt")
+                run_button = gr.Button(label="Run")
+                with gr.Accordion("Advanced options", open=False):
+                    num_samples = gr.Slider(
+                        label="Images", minimum=1, maximum=4, value=4, step=1)
+                    ddim_steps = gr.Slider(label="Steps", minimum=1,
+                                        maximum=50, value=45, step=1)
+                    scale = gr.Slider(
+                        label="Guidance Scale", minimum=0.1, maximum=30.0, value=10, step=0.1
+                    )
+                    seed = gr.Slider(
+                        label="Seed",
+                        minimum=0,
+                        maximum=2147483647,
+                        step=1,
+                        randomize=True,
+                    )
+            with gr.Column():
+                gallery = gr.Gallery(label="Generated images", show_label=False).style(
+                    grid=[2], height="auto")
+
+        run_button.click(fn=inpaint, inputs=[input_image, prompt, ddim_steps, num_samples, scale, seed], outputs=[gallery])
+
+
+    block.launch()
+
 
         
 
