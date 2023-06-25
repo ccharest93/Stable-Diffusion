@@ -8,6 +8,7 @@ from einops import repeat
 from functools import partial
 from tqdm import tqdm
 from PIL import Image
+from helper import GPUManager
 def pad_image(input_image):
     pad_w, pad_h = np.max(((2, 2), np.ceil(
         np.array(input_image.size) / 64).astype(int)), axis=0) * 64 - input_image.size
@@ -136,18 +137,25 @@ class LatentDiffusionInpainting(nn.Module):
         unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
         self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(torch.device('cuda'))
         self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(torch.device('cuda'))
-        for i, step in enumerate(iterator):
-            index = total_steps - i - 1
-            ts = torch.full((b,), step, device=torch.device('cuda'), dtype=torch.long)
-            outs = self.p_sample_ddim(img, cond, ts, 
-                                    index=index, 
-                                    temperature=temperature,
-                                    unconditional_guidance_scale=unconditional_guidance_scale,
-                                    unconditional_conditioning=unconditional_conditioning,)
-            img, pred_x0 = outs
-            if index % log_every_t == 0 or index == total_steps - 1:
-                intermediates['x_inter'].append(img.to(torch.device('cpu')))
-                intermediates['pred_x0'].append(pred_x0.to(torch.device('cpu')))
+        with GPUManager(tensors=[self.diffusion_model,
+                                img,
+                                cond, 
+                                unconditional_conditioning, 
+                                self.sqrt_alphas_cumprod, 
+                                self.sqrt_one_minus_alphas_cumprod],device= torch.device('cuda'),task= "Diffusion Loop") as tensors:
+            for i, step in enumerate(iterator):
+                index = total_steps - i - 1
+                ts = torch.full((b,), step, device=torch.device('cuda'), dtype=torch.long)
+                outs = self.p_sample_ddim(tensors[1], tensors[2], ts, 
+                                        index=index, 
+                                        temperature=temperature,
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        unconditional_conditioning=tensors[3],)
+                
+                img, pred_x0 = outs
+                if index % log_every_t == 0 or index == total_steps - 1:
+                    intermediates['x_inter'].append(img.to(torch.device('cpu')))
+                    intermediates['pred_x0'].append(pred_x0.to(torch.device('cpu')))
 
         #remove con
         cond['c_concat'][0] = cond['c_concat'][0].to(torch.device('cuda'))
@@ -244,16 +252,6 @@ def init_model():
     model = LatentDiffusionInpainting()
     model.load_checkpoints()
     return model
-# from PIL import Image
-# if __name__ == "__main__":
-#     with torch.no_grad():
-#         input_image = {"image": Image.open("test.jpg"), "mask": Image.open("test.jpg")}
-#         prompt = "A painting of a cat"        
-#         #inpaint function
-#         model = LatentDiffusionInpainting()
-#         model.load_checkpoints()
-#         model.inpaint(input_image, prompt)
-#         #save pil img 
 def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
     #preprocess
     init_image = input["image"].convert("RGB")
@@ -268,21 +266,15 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
 
     #encoding image conditioning
     c_cat = list()
-    # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
-    # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
     for ck in ['mask', 'masked_image']:
         cc = batch[ck].float()
         if ck != 'masked_image':
             bchw = [num_samples, 4, h // 8, w // 8]
             cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
         else:
-            cc = cc.to(torch.device('cuda'))
-            model.first_stage_model =model.first_stage_model.to(torch.device('cuda'))
-            cc = model.scale_factor * model.first_stage_model.encode(cc).sample()
-            # print("Allocated(MB): {}".format(torch.cuda.memory_allocated(device='cuda')/1000000))
-            # print("Reserved(MB): {}".format(torch.cuda.memory_reserved(device='cuda')/1000000))
-            model.first_stage_model = model.first_stage_model.to(torch.device('cpu'))
-            cc = cc.to(torch.device('cpu'))
+            with GPUManager(tensors= [model.first_stage_model, cc], device= torch.device('cuda'),task= "KLAutoEncoder encoding") as tensors:
+                out = tensors[0].encode(tensors[1]).sample().to(torch.device('cpu'))
+            cc = model.scale_factor * out
         c_cat.append(cc)
     c_cat = torch.cat(c_cat, dim=1)
     cond = {"c_concat": [c_cat], "c_crossattn": [c]}
@@ -295,7 +287,7 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
     #sampling
     prng = np.random.RandomState(seed) #rng
     start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
-    start_code = torch.from_numpy(start_code).to(device=torch.device('cpu'), dtype=torch.float32)
+
     shape = [num_samples, model.channels , h // 8, w // 8]
     result = model.sample(
         ddim_steps,
@@ -308,45 +300,52 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
     )
     return result
 
-with torch.no_grad():
-    model = init_model()
-    import gradio as gr
-    block = gr.Blocks().queue()
-    with block:
-        with gr.Row():
-            gr.Markdown("## Stable Diffusion Inpainting")
+# with torch.no_grad():
+#     model = init_model()
+#     import gradio as gr
+#     block = gr.Blocks().queue()
+#     with block:
+#         with gr.Row():
+#             gr.Markdown("## Stable Diffusion Inpainting")
 
-        with gr.Row():
-            with gr.Column():
-                input_image = gr.Image(source='upload', tool='sketch', type="pil")
-                prompt = gr.Textbox(label="Prompt")
-                run_button = gr.Button(label="Run")
-                with gr.Accordion("Advanced options", open=False):
-                    num_samples = gr.Slider(
-                        label="Images", minimum=1, maximum=4, value=4, step=1)
-                    ddim_steps = gr.Slider(label="Steps", minimum=1,
-                                        maximum=50, value=45, step=1)
-                    scale = gr.Slider(
-                        label="Guidance Scale", minimum=0.1, maximum=30.0, value=10, step=0.1
-                    )
-                    seed = gr.Slider(
-                        label="Seed",
-                        minimum=0,
-                        maximum=2147483647,
-                        step=1,
-                        randomize=True,
-                    )
-            with gr.Column():
-                gallery = gr.Gallery(label="Generated images", show_label=False).style(
-                    grid=[2], height="auto")
+#         with gr.Row():
+#             with gr.Column():
+#                 input_image = gr.Image(source='upload', tool='sketch', type="pil")
+#                 prompt = gr.Textbox(label="Prompt")
+#                 run_button = gr.Button(label="Run")
+#                 with gr.Accordion("Advanced options", open=False):
+#                     num_samples = gr.Slider(
+#                         label="Images", minimum=1, maximum=4, value=4, step=1)
+#                     ddim_steps = gr.Slider(label="Steps", minimum=1,
+#                                         maximum=50, value=45, step=1)
+#                     scale = gr.Slider(
+#                         label="Guidance Scale", minimum=0.1, maximum=30.0, value=10, step=0.1
+#                     )
+#                     seed = gr.Slider(
+#                         label="Seed",
+#                         minimum=0,
+#                         maximum=2147483647,
+#                         step=1,
+#                         randomize=True,
+#                     )
+#             with gr.Column():
+#                 gallery = gr.Gallery(label="Generated images", show_label=False).style(
+#                     grid=[2], height="auto")
 
-        run_button.click(fn=inpaint, inputs=[input_image, prompt, ddim_steps, num_samples, scale, seed], outputs=[gallery])
-
-
-    block.launch()
+#         run_button.click(fn=inpaint, inputs=[input_image, prompt, ddim_steps, num_samples, scale, seed], outputs=[gallery])
 
 
-        
+#     block.launch()
+
+if __name__ == "__main__":
+    with torch.no_grad():
+        input_image = {"image": Image.open("test.jpg"), "mask": Image.open("test.jpg")}
+        prompt = "A painting of a cat"        
+        #inpaint function
+        model = LatentDiffusionInpainting()
+        model.load_checkpoints()
+        inpaint(input_image, prompt)
+        #save pil img         
 
 
 
