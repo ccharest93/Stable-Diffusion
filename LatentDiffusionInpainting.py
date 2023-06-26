@@ -276,7 +276,6 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
 
     #encoding text conditioning
     c = model.get_conditional(batch["txt"])
-
     #encoding image conditioning
     c_cat = list()
     for ck in model.concat_keys:
