@@ -9,6 +9,7 @@ from functools import partial
 from tqdm import tqdm
 from PIL import Image
 from helper import GPUManager
+from pytorch_memlab import MemReporter
 def pad_image(input_image):
     pad_w, pad_h = np.max(((2, 2), np.ceil(
         np.array(input_image.size) / 64).astype(int)), axis=0) * 64 - input_image.size
@@ -50,32 +51,32 @@ def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
-from torchinfo import summary
+
 class LatentDiffusionInpainting(nn.Module):
     def __init__(self):
         super().__init__()
-        self.parameterization = 'eps' 
-        self.image_size = 64
-        self.channels = 4
         self.diffusion_model = Unet()
-        #diffusion params
+        self.diffusion_model.eval()
         self.dpm_num_timesteps = 1000
         self.diffusion_param_schedule()
-        timesteps, = self.betas.shape
-        self.num_timesteps = int(timesteps)
-        self.scale_factor = 0.18215
-        #submodels init
-        self.first_stage_model = AutoencoderKL()
-        self.cond_stage_model, _, _ = open_clip.create_model_and_transforms("ViT-H-14", device=torch.device('cpu'), pretrained="laion2b_s32b_b79k")
-        del self.cond_stage_model.visual
-        self.max_length = 77
-        #---------- init latent diffusion end
         self.concat_keys = ('mask', 'masked_image')
         self.masked_image_key = 'masked_image'
+
+        self.scale_factor = 0.18215
+        self.channels = 4
+        self.first_stage_model = AutoencoderKL()
+        self.first_stage_model.eval()
+
+        self.cond_stage_model, _, _ = open_clip.create_model_and_transforms("ViT-H-14", device=torch.device('cpu'), pretrained="laion2b_s32b_b79k")
+        self.cond_stage_model.eval()
+        del self.cond_stage_model.visual
+        self.max_length = 77
+
     def diffusion_param_schedule(self):
         v_posterior = 0.0
         linear_start=1e-4
         linear_end=2e-2
+
         betas = (torch.linspace(linear_start ** 0.5, linear_end ** 0.5, 1000, dtype=torch.float64) ** 2).numpy()
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
@@ -98,8 +99,9 @@ class LatentDiffusionInpainting(nn.Module):
         lvlb_weights[0] = lvlb_weights[1]
         self.lvlb_weights = lvlb_weights
     
+    @torch.no_grad()
     def sample(self,
-               S,
+               num_ddim_timesteps,
                shape,
                cond,
                eta= 1.0,
@@ -110,112 +112,88 @@ class LatentDiffusionInpainting(nn.Module):
                unconditional_conditioning=None):
         
         #get diffusion timesteps
-        num_ddim_timesteps = S
         c = self.dpm_num_timesteps // num_ddim_timesteps
         ddim_timesteps = np.asarray(list(range(0, self.dpm_num_timesteps , c)))
-        ddim_timesteps = ddim_timesteps + 1
 
         # calculations for variance schedule
         alphacums = self.alphas_cumprod.cpu()
         self.ddim_alphas = alphacums[ddim_timesteps]
         self.ddim_alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())
-        self.ddim_sqrt_one_minus_alphas = np.sqrt(1. - self.ddim_alphas)
         self.ddim_sigmas = eta * np.sqrt((1 - self.ddim_alphas_prev) / (1 - self.ddim_alphas) * (1 - self.ddim_alphas / self.ddim_alphas_prev))
-        
+        self.ddim_sqrt_one_minus_alphas  = np.sqrt(1. - self.ddim_alphas)
         b = shape[0]
-        img = x_T
+        x = x_T
         timesteps = ddim_timesteps
-        intermediates = {'x_inter': [img], 'pred_x0': [img]}
+        intermediates = {'x_inter': [x], 'pred_x0': [x]}
         time_range = np.flip(timesteps)
         total_steps = timesteps.shape[0]
-        iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
-        self.diffusion_model = self.diffusion_model.to(torch.device('cuda'))
-        img = img.to(torch.device('cuda'))
-        cond['c_concat'][0] = cond['c_concat'][0].to(torch.device('cuda'))
-        cond['c_crossattn'][0] = cond['c_crossattn'][0].to(torch.device('cuda'))
-        unconditional_conditioning['c_concat'][0] = unconditional_conditioning['c_concat'][0].to(torch.device('cuda'))
-        unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
-        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(torch.device('cuda'))
-        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(torch.device('cuda'))
-        with GPUManager(tensors=[self.diffusion_model,
-                                img,
-                                cond, 
-                                unconditional_conditioning, 
-                                self.sqrt_alphas_cumprod, 
-                                self.sqrt_one_minus_alphas_cumprod],device= torch.device('cuda'),task= "Diffusion Loop") as tensors:
-            for i, step in enumerate(iterator):
+        with GPUManager(tensors={"diffusion_model":self.diffusion_model,
+                                "x":x,
+                                "cond":cond,
+                                "unconditional_conditioning":unconditional_conditioning,
+                                "sqrt_alphas_cumprod":self.sqrt_alphas_cumprod,
+                                "sqrt_one_minus_alphas_cumprod":self.sqrt_one_minus_alphas_cumprod},device= torch.device('cuda'),task= "Diffusion Loop") as tensors:
+            for i, step in enumerate(tqdm(time_range, desc='DDIM Sampler', total=total_steps)):
                 index = total_steps - i - 1
-                ts = torch.full((b,), step, device=torch.device('cuda'), dtype=torch.long)
-                outs = self.p_sample_ddim(tensors[1], tensors[2], ts, 
-                                        index=index, 
-                                        temperature=temperature,
-                                        unconditional_guidance_scale=unconditional_guidance_scale,
-                                        unconditional_conditioning=tensors[3],)
+                batch_size, *_, device = *tensors['x'].shape, tensors['x'].device
+
+                tensors['ts'] = torch.full((b,), step, device=torch.device('cuda'), dtype=torch.long)
+                tensors['x_in'] = torch.cat([tensors['x']] * 2)
+                tensors['t_in'] = torch.cat([tensors['ts']] * 2)
+                tensors['c_in'] = dict()
+                #batch the conditional and unconditional embeddings together (use?_)
+                for k in tensors['cond']:
+                    if isinstance(tensors['cond'][k], list):
+                        tensors['c_in'][k] = [torch.cat([
+                            tensors['unconditional_conditioning'][k][i],
+                            tensors['cond'][k][i]]) for i in range(len(tensors['cond'][k]))]
+                    else:
+                        tensors['c_in'][k] = torch.cat([
+                                tensors['unconditional_conditioning'][k],
+                                tensors['cond'][k]])
+                tensors['xc'] = torch.cat([tensors['x_in']] + tensors['c_in']['c_concat'], dim=1)
+                del tensors['x_in']
+                tensors['cc'] = torch.cat(tensors['c_in']['c_crossattn'], 1)
+                del tensors['c_in']
+
+
+                tensors['model_uncond'], tensors['model_t']  = tensors['diffusion_model'](tensors['xc'], timesteps=tensors['t_in'], context=tensors['cc']).chunk(2)
+                tensors['model_output'] = tensors['model_uncond'] + unconditional_guidance_scale * (tensors['model_t'] - tensors['model_uncond'])
+                del tensors['model_uncond'], tensors['model_t']
+
+                alphas = self.ddim_alphas
+                alphas_prev = self.ddim_alphas_prev
+                sigmas =  self.ddim_sigmas
+                sqrt_one_minus_alphas = self.ddim_sqrt_one_minus_alphas
                 
-                img, pred_x0 = outs
+                # select parameters corresponding to the currently considered timestep
+                a_t = torch.full((batch_size, 1, 1, 1), alphas[index], device=device)
+                a_prev = torch.full((batch_size, 1, 1, 1), alphas_prev[index], device=device)
+                sigma_t = torch.full((batch_size, 1, 1, 1), sigmas[index], device=device)
+                sqrt_one_minus_at = torch.full((b, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+
+
+                # current prediction for x_0
+                #tensors['pred_x0'] =  extract_into_tensor(tensors['sqrt_alphas_cumprod'], tensors['ts'], tensors[1].shape) * tensors[1] - extract_into_tensor(tensors['sqrt_one_minus_alphas_cumprod'], tensors['ts'], tensors[1].shape) * tensors['model_output']
+                tensors['pred_x0'] = (tensors['x'] - sqrt_one_minus_at * tensors['model_output']) / a_t.sqrt()
+                # direction pointing to x_t
+                tensors['dir_xt'] = (1. - a_prev - sigma_t**2).sqrt() * tensors['model_output']
+                noise = sigma_t * noise_like(tensors['x'].shape, device, False) * temperature
+                tensors['x'] = a_prev.sqrt() * tensors['pred_x0'] + tensors['dir_xt'] + noise
                 if index % log_every_t == 0 or index == total_steps - 1:
-                    intermediates['x_inter'].append(img.to(torch.device('cpu')))
-                    intermediates['pred_x0'].append(pred_x0.to(torch.device('cpu')))
+                    intermediates['x_inter'].append(tensors['x'].to(torch.device('cpu')))
+                    intermediates['pred_x0'].append(tensors['pred_x0'].to(torch.device('cpu')))
+            self.diffusion_model = tensors['diffusion_model'].to(torch.device('cpu'))
+            out = tensors['x']
 
-        #remove con
-        cond['c_concat'][0] = cond['c_concat'][0].to(torch.device('cuda'))
-        cond['c_crossattn'][0] = cond['c_crossattn'][0].to(torch.device('cuda'))
-        unconditional_conditioning['c_concat'][0] = unconditional_conditioning['c_concat'][0].to(torch.device('cuda'))
-        unconditional_conditioning['c_crossattn'][0] = unconditional_conditioning['c_crossattn'][0].to(torch.device('cuda'))
-        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(torch.device('cuda'))
-        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(torch.device('cuda'))
-        pred_x0 = pred_x0.to(torch.device('cpu'))
-        self.diffusion_model = self.diffusion_model.to(torch.device('cpu'))
-
-        model.first_stage_model =model.first_stage_model.to(torch.device('cuda'))
-        x_samples_ddim = self.first_stage_model.decode(img)
-        model.first_stage_model =model.first_stage_model.to(torch.device('cpu'))
-        result = torch.clamp((x_samples_ddim + 1.0) / 2.0,min=0.0, max=1.0)
-
+        out = 1. / self.scale_factor * out
+        with GPUManager(tensors={"self.first_stage_model":self.first_stage_model,
+                                 "out":out},device= torch.device('cuda'),task= "KLAutoEncoder decoding") as tensors:
+            out = tensors["self.first_stage_model"].decode(tensors["out"]).to(torch.device('cpu'))
+            self.first_stage_model = tensors["self.first_stage_model"].to(torch.device('cpu'))
+        result = torch.clamp((out + 1.0) / 2.0,min=0.0, max=1.0)
         result = result.cpu().detach().numpy().transpose(0, 2, 3, 1) * 255
         return [Image.fromarray(img.astype(np.uint8)) for img in result]
-    @torch.no_grad()
-    def p_sample_ddim(self, x, c, t, index, temperature=1.,unconditional_guidance_scale=1., unconditional_conditioning=None):
-        b, *_, device = *x.shape, x.device
-        x_in = torch.cat([x] * 2)
-        t_in = torch.cat([t] * 2)
-        c_in = dict()
-        #batch the conditional and unconditional embeddings together (use?_)
-        for k in c:
-            if isinstance(c[k], list):
-                c_in[k] = [torch.cat([
-                    unconditional_conditioning[k][i],
-                    c[k][i]]) for i in range(len(c[k]))]
-            else:
-                c_in[k] = torch.cat([
-                        unconditional_conditioning[k],
-                        c[k]])
-        xc = torch.cat([x_in] + c_in['c_concat'], dim=1)
-        cc = torch.cat(c_in['c_crossattn'], 1)
-
-        out = self.diffusion_model(xc, t_in, context=cc)
-        model_uncond, model_t = out.chunk(2)
-        model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
-        e_t = model_output
-
-        alphas = self.ddim_alphas
-        alphas_prev = self.ddim_alphas_prev
-        sqrt_one_minus_alphas =  self.ddim_sqrt_one_minus_alphas
-        sigmas =  self.ddim_sigmas
-        
-        # select parameters corresponding to the currently considered timestep
-        a_t = torch.full((b, 1, 1, 1), alphas[index], device=device)
-        a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=device)
-        sigma_t = torch.full((b, 1, 1, 1), sigmas[index], device=device)
-
-        # current prediction for x_0
-        pred_x0 =  extract_into_tensor(self.sqrt_alphas_cumprod, t, x.shape) * x - extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * model_output
-
-        # direction pointing to x_t
-        dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-        noise = sigma_t * noise_like(x.shape, device, False) * temperature
-        x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
-        return x_prev, pred_x0
     
     def get_conditional(self, text):
         tokens = open_clip.tokenize(text)
@@ -246,12 +224,12 @@ class LatentDiffusionInpainting(nn.Module):
         di = {k.replace(".emb_layers.1.", ".emb_proj.",1): v for k, v in di.items()}
         self.load_state_dict(di, strict=False)
 
-
-    
 def init_model():
     model = LatentDiffusionInpainting()
     model.load_checkpoints()
     return model
+
+@torch.no_grad()
 def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
     #preprocess
     init_image = input["image"].convert("RGB")
@@ -263,7 +241,6 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
 
     #encoding text conditioning
     c = model.get_conditional(batch["txt"])
-
     #encoding image conditioning
     c_cat = list()
     for ck in ['mask', 'masked_image']:
@@ -272,9 +249,11 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
             bchw = [num_samples, 4, h // 8, w // 8]
             cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
         else:
-            with GPUManager(tensors= [model.first_stage_model, cc], device= torch.device('cuda'),task= "KLAutoEncoder encoding") as tensors:
-                out = tensors[0].encode(tensors[1]).sample().to(torch.device('cpu'))
-            cc = model.scale_factor * out
+            with GPUManager(tensors= { "model.first_stage_model":model.first_stage_model,
+                                        "cc":cc}, device= torch.device('cuda'),task= "KLAutoEncoder encoding") as tensors:
+                cc = tensors["model.first_stage_model"].encode(tensors["cc"]).sample().to(torch.device('cpu'))
+                model.first_stage_model = tensors["model.first_stage_model"].to(torch.device('cpu'))
+            cc = model.scale_factor * cc
         c_cat.append(cc)
     c_cat = torch.cat(c_cat, dim=1)
     cond = {"c_concat": [c_cat], "c_crossattn": [c]}
@@ -285,9 +264,9 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
     uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
 
     #sampling
-    prng = np.random.RandomState(seed) #rng
-    start_code = prng.randn(num_samples, 4, h // 8, w // 8) #random start code
-
+    prng = np.random.RandomState(seed)
+    start_code = prng.randn(num_samples, 4, h // 8, w // 8)
+    start_code = torch.from_numpy(start_code).to(device=torch.device('cpu'),dtype=torch.float32)
     shape = [num_samples, model.channels , h // 8, w // 8]
     result = model.sample(
         ddim_steps,
@@ -300,42 +279,42 @@ def inpaint(input, prompt, ddim_steps=45, num_samples=1, scale=10, seed=100):
     )
     return result
 
-# with torch.no_grad():
-#     model = init_model()
-#     import gradio as gr
-#     block = gr.Blocks().queue()
-#     with block:
-#         with gr.Row():
-#             gr.Markdown("## Stable Diffusion Inpainting")
+with torch.no_grad():
+    model = init_model()
+    import gradio as gr
+    block = gr.Blocks().queue()
+    with block:
+        with gr.Row():
+            gr.Markdown("## Stable Diffusion Inpainting")
 
-#         with gr.Row():
-#             with gr.Column():
-#                 input_image = gr.Image(source='upload', tool='sketch', type="pil")
-#                 prompt = gr.Textbox(label="Prompt")
-#                 run_button = gr.Button(label="Run")
-#                 with gr.Accordion("Advanced options", open=False):
-#                     num_samples = gr.Slider(
-#                         label="Images", minimum=1, maximum=4, value=4, step=1)
-#                     ddim_steps = gr.Slider(label="Steps", minimum=1,
-#                                         maximum=50, value=45, step=1)
-#                     scale = gr.Slider(
-#                         label="Guidance Scale", minimum=0.1, maximum=30.0, value=10, step=0.1
-#                     )
-#                     seed = gr.Slider(
-#                         label="Seed",
-#                         minimum=0,
-#                         maximum=2147483647,
-#                         step=1,
-#                         randomize=True,
-#                     )
-#             with gr.Column():
-#                 gallery = gr.Gallery(label="Generated images", show_label=False).style(
-#                     grid=[2], height="auto")
+        with gr.Row():
+            with gr.Column():
+                input_image = gr.Image(source='upload', tool='sketch', type="pil")
+                prompt = gr.Textbox(label="Prompt")
+                run_button = gr.Button(label="Run")
+                with gr.Accordion("Advanced options", open=False):
+                    num_samples = gr.Slider(
+                        label="Images", minimum=1, maximum=4, value=4, step=1)
+                    ddim_steps = gr.Slider(label="Steps", minimum=1,
+                                        maximum=200, value=45, step=1)
+                    scale = gr.Slider(
+                        label="Guidance Scale", minimum=0.1, maximum=30.0, value=10, step=0.1
+                    )
+                    seed = gr.Slider(
+                        label="Seed",
+                        minimum=0,
+                        maximum=2147483647,
+                        step=1,
+                        randomize=True,
+                    )
+            with gr.Column():
+                gallery = gr.Gallery(label="Generated images", show_label=False).style(
+                    grid=[2], height="auto")
 
-#         run_button.click(fn=inpaint, inputs=[input_image, prompt, ddim_steps, num_samples, scale, seed], outputs=[gallery])
+        run_button.click(fn=inpaint, inputs=[input_image, prompt, ddim_steps, num_samples, scale, seed], outputs=[gallery])
 
 
-#     block.launch()
+    block.launch()
 
 if __name__ == "__main__":
     with torch.no_grad():

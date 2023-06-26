@@ -120,13 +120,13 @@ class Unet(nn.Module):
             if isinstance(module, nn.ModuleList):
                 for timestep in module:
                     if isinstance(timestep, ResBlock):
-                        h = timestep(h, timesteps=t_emb, context=context)
+                        h = timestep(h, t_emb=t_emb, context=context)
                     if isinstance(timestep, SpatialTransformer):
-                        h = timestep(h, timesteps=t_emb, context=context)
+                        h = timestep(h, t_emb=t_emb, context=context)
             hs.append(h)
 
         for module in self.middle_block:
-            h = module(h, emb=t_emb, context=context)
+            h = module(h, t_emb=t_emb, context=context)
 
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
@@ -135,9 +135,9 @@ class Unet(nn.Module):
             elif isinstance(module, nn.ModuleList):
                 for timestep in module:
                     if isinstance(timestep, ResBlock):
-                        h = timestep(h, timesteps=t_emb, context=context)
+                        h = timestep(h, t_emb=t_emb, context=context)
                     if isinstance(timestep, SpatialTransformer):
-                        h = timestep(h, timesteps=t_emb, context=context)
+                        h = timestep(h, t_emb=t_emb, context=context)
                     if isinstance(timestep, Upsample):
                         h = timestep(h)
             else:

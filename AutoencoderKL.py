@@ -109,9 +109,9 @@ class Encoder(nn.Module):
 
         # middle
         h = hs[-1]
-        h = self.mid.block_1(h, emb=None, context=None)
+        h = self.mid.block_1(h, t_emb=None, context=None)
         h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, emb=None, context=None)
+        h = self.mid.block_2(h, t_emb=None, context=None)
 
         # end
         h = self.norm_out(h)
@@ -179,14 +179,14 @@ class Decoder(nn.Module):
         h = self.conv_in(z)
 
         # middle
-        h = self.mid.block_1(h, emb=None, context=None)
+        h = self.mid.block_1(h, t_emb=None, context=None)
         h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, emb=None, context=None)
+        h = self.mid.block_2(h, t_emb=None, context=None)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks+1):
-                h = self.up[i_level].block[i_block](h, emb = None, context = None)
+                h = self.up[i_level].block[i_block](h, t_emb = None, context = None)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
