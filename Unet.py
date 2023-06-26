@@ -110,7 +110,8 @@ class Unet(nn.Module):
         h = x
         hs = []
         t_emb = timestep_embedding(timesteps, self.emb_channels)
-        emb = self.time_embed(t_emb)
+        del timesteps
+        t_emb = self.time_embed(t_emb)
         for module in self.input_blocks:
             if isinstance(module, Downsample):
                 h = module(h)
@@ -119,13 +120,13 @@ class Unet(nn.Module):
             if isinstance(module, nn.ModuleList):
                 for timestep in module:
                     if isinstance(timestep, ResBlock):
-                        h = timestep(h, emb=emb, context=context)
+                        h = timestep(h, timesteps=t_emb, context=context)
                     if isinstance(timestep, SpatialTransformer):
-                        h = timestep(h, emb=emb, context=context)
+                        h = timestep(h, timesteps=t_emb, context=context)
             hs.append(h)
 
         for module in self.middle_block:
-            h = module(h, emb=emb, context=context)
+            h = module(h, emb=t_emb, context=context)
 
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
@@ -134,9 +135,9 @@ class Unet(nn.Module):
             elif isinstance(module, nn.ModuleList):
                 for timestep in module:
                     if isinstance(timestep, ResBlock):
-                        h = timestep(h, emb=emb, context=context)
+                        h = timestep(h, timesteps=t_emb, context=context)
                     if isinstance(timestep, SpatialTransformer):
-                        h = timestep(h, emb=emb, context=context)
+                        h = timestep(h, timesteps=t_emb, context=context)
                     if isinstance(timestep, Upsample):
                         h = timestep(h)
             else:

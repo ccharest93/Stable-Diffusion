@@ -61,13 +61,13 @@ class ResBlock(nn.Module):
         else:
             self.skip_connection = nn.Conv2d( in_channels, out_channels, 1)
 
-    def forward(self, x, emb=None, context=None):
+    def forward(self, x, t_emb=None, context=None):
         h = self.norm1(x)
         h = nn.SiLU()(h)
         h = self.conv1(h)
 
-        if emb is not None:
-            h = h + self.emb_proj(nn.SiLU()(emb))[:,:,None,None]
+        if t_emb is not None:
+            h = h + self.emb_proj(nn.SiLU()(t_emb))[:,:,None,None]
         
         h = self.norm2(h)
         h = nn.SiLU()(h)

@@ -36,7 +36,7 @@ class GPUManager():
     
     def __exit__(self, exc_type, exc_value, exc_traceback):
         start = time.perf_counter()
-        self.tensors = to_device(self.tensors, 'cpu')
+        del self.tensors
         self.total_time += time.perf_counter() - start
         print("EXITING...")
         print("Context: {}".format(self.task))
