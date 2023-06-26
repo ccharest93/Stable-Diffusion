@@ -1,5 +1,5 @@
 # Stable-Diffusion
-Cleaned up the code from stable diffusion v2.1 removing a lot of the bells and whistle from the original to improve readability,
+Cleaned up the code from Stable UnCLIP 2.1 removing a lot of the bells and whistle from the original to improve readability,
 Implemented stricter GPU memory management allowing me to run inpainting of 768x768 image on a 6GB GPU.
 
 Usage: download the checkpoints for inpainting and put them in the checkpoints directory
