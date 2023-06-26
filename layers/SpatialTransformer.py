@@ -1,11 +1,18 @@
 from torch import nn
 from torch.nn import functional as F
-from layers.util import zero_module
 from einops import rearrange
 import xformers
 import xformers.ops
 from typing import Optional, Any
 import torch
+
+def zero_module(module):
+    """
+    Zero out the parameters of a module and return it.
+    """
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
 
 class GEGLU(nn.Module):
     def __init__(self, 

@@ -1,0 +1,2 @@
+Put unCLIP checkpoints here.
+For inpainting i tested the 512-inpainting-ema.ckpt
